@@ -1,23 +1,23 @@
-from base64 import b64encode, b64decode
+import inspect
+import json
+import pathlib
+import pickle
+import time
+from base64 import b64decode, b64encode
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
-import pickle
 
-import inspect
-import time
-from wfcommons.wfchef.recipes.cycles.recipe import CyclesRecipe
-from wfcommons.wfchef.recipes.montage import MontageRecipe
-from wfcommons.wfchef.recipes.seismology import SeismologyRecipe
+import networkx as nx
 from wfcommons.wfchef.recipes.blast import BlastRecipe
 from wfcommons.wfchef.recipes.bwa import BwaRecipe
+from wfcommons.wfchef.recipes.cycles.recipe import CyclesRecipe
 from wfcommons.wfchef.recipes.epigenomics import EpigenomicsRecipe
-from wfcommons.wfchef.recipes.srasearch import SrasearchRecipe
 from wfcommons.wfchef.recipes.genome import GenomeRecipe
+from wfcommons.wfchef.recipes.montage import MontageRecipe
+from wfcommons.wfchef.recipes.seismology import SeismologyRecipe
 from wfcommons.wfchef.recipes.soykb import SoykbRecipe
+from wfcommons.wfchef.recipes.srasearch import SrasearchRecipe
 from wfcommons.wfchef.utils import draw
-import networkx as nx
-import pathlib
-import json
 
 RECIPES = {
     "montage": MontageRecipe,

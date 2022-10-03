@@ -12,9 +12,8 @@ thisdir = pathlib.Path(__file__).parent.resolve()
 
 def preprocess(workflow: nx.DiGraph,
                network: nx.Graph,
-               task_cost: Callable[[Hashable, Hashable], float],
                schedule: Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]):
-    sched = schedule(workflow, network, task_cost)
+    sched = dict(sorted(schedule(workflow, network).items(), key=lambda x: x[0]))
     def comm_cost(src, dst, node_src, node_dst):
         if node_src == node_dst:
             return 0
@@ -22,7 +21,10 @@ def preprocess(workflow: nx.DiGraph,
 
     df_tasks = pd.DataFrame(
         [
-            [task, task_label, *[task_cost(task, node) for node in network.nodes]]
+            [task, task_label, *[
+                workflow.nodes[task]['cost'] / network.nodes[node]['cpu']
+                for node in network.nodes
+            ]]
             for task, task_label in sched.items()
         ],
         columns=['task', 'task_label', *[f'Cost_{node}' for node in network.nodes]]

@@ -1,10 +1,10 @@
-from typing import Callable, Dict, FrozenSet, Hashable, Iterable, List, Tuple, Union
-import networkx as nx
-import numpy as np 
+import pathlib
+from copy import deepcopy
 from dataclasses import dataclass
-import pathlib 
-import matplotlib.pyplot as plt 
-from copy import deepcopy 
+from typing import Dict, FrozenSet, Hashable, List, Tuple
+
+import networkx as nx
+import numpy as np
 
 thisdir = pathlib.Path(__file__).resolve().parent
 
@@ -41,9 +41,7 @@ def schedule_task(schedule: List[Task],
     schedule.append(new_task)
     return new_task
 
-def heft(network: nx.Graph, 
-         task_graph: nx.DiGraph,
-         task_cost: Callable[[Hashable, Hashable], float]) -> Tuple[Dict[str, Task], Dict[str, List[Task]], Dict[str, List[Task]]]:
+def heft(network: nx.Graph, task_graph: nx.DiGraph) -> Tuple[Dict[str, Task], Dict[str, List[Task]], Dict[str, List[Task]]]:
     paths: Dict[str, Dict[str, List[str]]] = nx.shortest_paths.shortest_path(network)
     comp_schedule: Dict[str, List[Task]] = {node: [] for node in network.nodes}
     comm_schedule: Dict[FrozenSet[str], List[Task]] = {frozenset(edge): [] for edge in network.edges}
@@ -92,7 +90,7 @@ def heft(network: nx.Graph,
                 locale=node,
                 name=task_name,
                 min_start_time=min_arrival_time,
-                exec_time=task_cost(task_name, node)
+                exec_time=task_graph.nodes[task_name]['cost'] / network.nodes[node]['cpu']
             )
             _task_schedule[comp_task.name] = comp_task
             finish_time = comp_task.end
@@ -109,3 +107,16 @@ def heft(network: nx.Graph,
 
 
     return task_schedule, comm_schedule, comp_schedule
+
+def schedule(workflow: nx.DiGraph, network: nx.Graph) -> Dict[Hashable, Hashable]:
+    """Schedule workflow on network using HEFT algorithm
+    
+    Args:
+        workflow (nx.DiGraph): Workflow graph
+        network (nx.Graph): Network graph
+
+        Returns:
+            Dict[Hashable, Hashable]: Mapping from task to node
+    """
+    task_schedule, comm_schedule, comp_schedule = heft(network, workflow)
+    return {task.name: node for node, tasks in comp_schedule.items() for task in tasks}

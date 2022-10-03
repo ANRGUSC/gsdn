@@ -1,5 +1,5 @@
 import random
-from typing import Callable, Dict, Generator, List
+from typing import Callable, Dict, Generator
 
 import networkx as nx
 from wfcommons.common.file import FileLink
@@ -66,6 +66,12 @@ def gen_workflows(n_workflows: int,
                 task_ids[workflow.nodes[dst]['task'].name],
                 data=data_size
             )
+
+        max_data_size = max(new_workflow.edges[edge]['data'] for edge in new_workflow.edges)
+        max_task_cost = max(new_workflow.nodes[node]['cost'] for node in new_workflow.nodes)
+
+        for edge in new_workflow.edges:
+            new_workflow.edges[edge]['data'] = new_workflow.edges[edge]['data'] / max_data_size * max_task_cost
 
         print(f'Generated workflow with {len(new_workflow.nodes)} tasks and {len(new_workflow.edges)} edges')
         # draw(new_workflow, save=thisdir.joinpath(recipe_name))

@@ -1,14 +1,20 @@
-from copy import deepcopy
-import itertools
 import pathlib
-import random
 from typing import Callable, Dict, Generator, Hashable, List, Optional, Tuple
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import pandas as pd
+import plotly.express as px
 from matplotlib.animation import FuncAnimation
+from polygenerator import random_convex_polygon, random_polygon
+
+from data_face_recognition import \
+    gen_workflows as gen_workflows_face_recognition
+from scheduler_gcn import schedule as schedule_gcn
+from scheduler_heft import schedule as schedule_heft
+from scheduler_rand import schedule as schedule_rand
 
 thisdir = pathlib.Path(__file__).parent.resolve()
 
@@ -49,11 +55,9 @@ class Polygon:
 
 def to_fully_connected(graph: nx.Graph) -> nx.Graph:
     graph = graph.copy()
+    paths = dict(nx.all_pairs_dijkstra_path_length(graph, weight=lambda u, v, d: 1/d["bandwidth"]))
     for node1, node2 in nx.non_edges(graph):
-        bandwidth = 1 / nx.shortest_path_length(
-            graph, node1, node2, 
-            weight=lambda u, v, d: 1/d["bandwidth"]
-        )
+        bandwidth = 1 / paths[node1][node2]
         graph.add_edge(node1, node2, bandwidth=bandwidth)
     return graph
 
@@ -113,16 +117,16 @@ class Simulation:
     def run(self, 
             rounds: Optional[int] = None,
             get_workflow: Optional[Callable[[], nx.DiGraph]] = None,
-            scheduler: Optional[Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]] = None) -> Generator[nx.Graph, None, None]:
+            scheduler: Optional[Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]] = None) -> Generator[Tuple[nx.Graph, Optional[float]], None, None]:
         i = 0
         if get_workflow is not None:
             workflow = get_workflow()
-        schedule: Dict[Hashable, Hashable] = {}
+        schedule: Dict[Hashable, Hashable] = None
         finish_times: Dict[Hashable, float] = {}
         sim_time = 0
+        start_time = sim_time
         while True:
             sim_time = i * self.timestep
-
             # move Agents and get comm network
             dists = (np.arange(0, self.polygon.perimeter, self.polygon.perimeter / self.num_agents) + sim_time) % self.polygon.perimeter
             pos = [self.polygon._get_point(d) for d in dists]
@@ -134,26 +138,36 @@ class Simulation:
             for src, dst in nx.geometric_edges(network, radius=self.radius_threshold):
                 d = np.sqrt((pos[src][0] - pos[dst][0]) ** 2 + (pos[src][1] - pos[dst][1]) ** 2)
                 network.add_edge(src, dst, bandwidth=self.bandwidth(d))
-            yield network
-            i += 1
+            network = to_fully_connected(network)
 
             # Execute workflow assuming network is valid for next timestep time
             if get_workflow is not None and scheduler is not None:
-                schedule = scheduler(workflow, network)
+                if schedule is None:
+                    schedule = scheduler(workflow, network)
                 finish_times, success = run_workflow(
-                    workflow, network, schedule, finish_times, sim_time+self.timestep
+                    workflow, network, schedule, finish_times, (sim_time-start_time)+self.timestep
                 )
                 if success:
-                    makespan = max(finish_times.values())
-                    print(f"Finished in {makespan:.2f} seconds")
+                    yield network, max(finish_times.values())
                     workflow = get_workflow()
+                    schedule = None
+                    finish_times = {}
+                    start_time = sim_time
+                else:
+                    yield network, None
+            else:
+                yield network, None
+            
+            i += 1
 
             # Stop if we have reached the end
             if rounds is not None and i >= rounds:
                 break
 
-
-def visual_sim(sim: Simulation) -> None:
+def visual_sim(sim: Simulation, 
+               rounds: Optional[int] = None,
+               get_workflow: Optional[Callable[[], nx.DiGraph]] = None,
+               scheduler: Optional[Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]] = None) -> None:
     fig, (ax1, ax2) = plt.subplots(1, 2)
     fig.tight_layout()
     ax1.axis('equal')
@@ -161,8 +175,8 @@ def visual_sim(sim: Simulation) -> None:
 
     ax1.add_patch(patches.Polygon(sim.polygon.points, fill=False, edgecolor="black"))
     
-    sim_run = sim.run()
-    init_network = next(sim_run)
+    sim_run = sim.run(rounds, get_workflow, scheduler)
+    init_network, _ = next(sim_run)
     xdata, ydata = list(zip(*[pos for _, pos in nx.get_node_attributes(init_network, "pos").items()]))
     ln, = ax1.plot(xdata, ydata, 'ro')
 
@@ -174,8 +188,8 @@ def visual_sim(sim: Simulation) -> None:
     def update(frame):
         nonlocal round
         round += 1
-        print(f"Round {round}")
-        network = next(sim_run)
+        print(f"Round {round} - Sim Time {round*sim.timestep:.2f} seconds")
+        network, _ = next(sim_run)
         xdata, ydata = list(zip(*[pos for _, pos in nx.get_node_attributes(network, "pos").items()]))
         ln.set_data(xdata, ydata)
 
@@ -186,25 +200,141 @@ def visual_sim(sim: Simulation) -> None:
     ani = FuncAnimation(fig, update, frames=100, interval=100)
     plt.show()
 
-def save_sim_networks(sim: Simulation, savedir: pathlib.Path, rounds: int = 100) -> None:
-    savedir.mkdir(parents=True, exist_ok=True)
-    for i, network in enumerate(sim.run(rounds=rounds)):
-        nx.write_gml(to_fully_connected(network), savedir / f"network_{i}.gml")
-
 def main():
-    polygon = Polygon([(0, 0), (10, 0), (10, 10), (5, 10), (5, 5), (2, 5), (2, 10), (0, 10)])
-    sim = Simulation(
-        polygon=polygon,
-        agent_cpus=[random.random() for _ in range(10)],
-        timestep=0.1,
-        radius_threshold=7,
-        bandwidth=lambda x: 1 / (1 + np.exp(-x))
-    )
+    num_nodes = 10
+    timestep = 1
+    perimeter = 100
+    n_trips = 3 # number of trips around the polygon
+    n_sims = 9 # number of simulations to run
 
-    visual_sim(sim)
-    # save_sim_networks(sim, pathlib.Path("sim_networks"))
+    rows = []
+    bw_rows = []
+    bw_one_rows = []
+    for i_sim in range(n_sims):
 
+        # enough rounds for robots to make a round trip
+        rounds = int(perimeter / timestep) * n_trips
+        print('Simulating for {} rounds'.format(rounds))
+
+        _vertices = random_polygon(num_nodes)
+        # normalized polygon so agents traverse entire polygon in one unit of time
+        perim = Polygon(_vertices).perimeter
+        _vertices = [(x/perim*perimeter, y/perim*perimeter) for x, y in _vertices]
+        polygon = Polygon(_vertices)
+
+        print('Perimeter:', polygon.perimeter)
+
+        sim = Simulation(
+            polygon=polygon,
+            agent_cpus=[1 for _ in range(num_nodes)],
+            timestep=timestep,
+            radius_threshold=perimeter * (1+0.01)/num_nodes,
+            bandwidth=lambda x: 1/(1 + np.exp((x/perimeter*num_nodes-1)*5))
+        )
+
+        # visual_sim(sim, rounds=rounds)
+        # return
+
+        workflow = gen_workflows_face_recognition(1)[0]
+        first_network, _ = next(sim.run())
+
+        static_sched = schedule_heft(workflow, first_network)
         
+        sim_run_gcn = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_gcn)
+        sim_run_heft = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_heft)
+        sim_run_static = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=lambda w, n: static_sched)
+        sim_run_rand = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_rand)
+
+
+        i = 0
+        for frame_gcn, frame_heft, frame_static, frame_rand in zip(sim_run_gcn, sim_run_heft, sim_run_static, sim_run_rand):
+            # print('Sim Time:', i*sim.timestep)
+            sim_time = i * sim.timestep
+            
+            network, makespan_gcn = frame_gcn
+            _, makespan_heft = frame_heft
+            _, makespan_static = frame_static
+            _, makespan_rand = frame_rand
+
+            # Network Bandwidth Info
+            avg_bandwidth = np.mean([network.edges[src, dst]["bandwidth"] for src, dst in network.edges])
+            std_bandwidth = np.std([network.edges[src, dst]["bandwidth"] for src, dst in network.edges])
+            bw_rows.append([i_sim, sim_time, avg_bandwidth, std_bandwidth])
+
+            # Average bandwidth of node 0
+            avg_bandwidth_one = np.mean([network.edges[src, dst]["bandwidth"] for src, dst in network.edges if src == 0])
+            std_bandwidth_one = np.std([network.edges[src, dst]["bandwidth"] for src, dst in network.edges if src == 0])
+            bw_one_rows.append([i_sim, sim_time, avg_bandwidth_one, std_bandwidth_one])
+
+            if makespan_gcn is not None:
+                print("GCN makespan:", makespan_gcn)
+                rows.append([i_sim, sim_time, makespan_gcn, 'GCN'])
+
+            if makespan_heft is not None:
+                print("HEFT makespan:", makespan_heft)
+                rows.append([i_sim, sim_time, makespan_heft, 'HEFT'])
+
+            if makespan_static is not None:
+                print("Static makespan:", makespan_static)
+                rows.append([i_sim, sim_time, makespan_static, 'Static'])
+
+            if makespan_rand is not None:
+                print("Random makespan:", makespan_rand)
+                rows.append([i_sim, sim_time, makespan_rand, 'Random'])
+            
+            i += 1
+
+    savedir = thisdir.joinpath('data', 'results')
+    df = pd.DataFrame(rows, columns=['Simulation', 'Time', 'Makespan', 'Scheduler'])
+    df.to_csv(savedir.joinpath('makespan.csv'), index=False)
+
+
+    # Plots
+    plotsdir = thisdir.joinpath('data', 'plots')	
+    plotsdir.mkdir(exist_ok=True, parents=True)
+
+    # Makespan Plot
+    fig = px.scatter(
+        df, 
+        x='Time', y='Makespan', 
+        color='Scheduler', 
+        facet_col='Simulation', 
+        facet_col_wrap=int(np.sqrt(n_sims)),
+        template='plotly_white',
+        trendline='expanding',
+        # trendline_options=dict(window=3)
+    )
+    fig.write_image(str(plotsdir.joinpath('makespan.png')))
+    fig.show()
+
+    # Bandwidth Plot
+    df_bw = pd.DataFrame(bw_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    df_bw.to_csv(savedir.joinpath('bandwidth.csv'), index=False)
+    fig_bw = px.scatter(
+        df_bw, 
+        x='Time', y='Avg Bandwidth', 
+        error_y='Std Bandwidth',
+        facet_col='Simulation', 
+        facet_col_wrap=int(np.sqrt(n_sims)),
+        template='plotly_white'
+    )
+    fig_bw.write_image(str(plotsdir.joinpath('bandwidth.png')))
+    fig_bw.show()
+
+    # Single Node Bandwidth Plot
+    df_bw_one = pd.DataFrame(bw_one_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    df_bw_one.to_csv(savedir.joinpath('bandwidth_one.csv'), index=False)
+    fig_bw_one = px.scatter(
+        df_bw_one,
+        x='Time', y='Avg Bandwidth',
+        error_y='Std Bandwidth',
+        facet_col='Simulation',
+        facet_col_wrap=int(np.sqrt(n_sims)),
+        template='plotly_white'
+    )
+    fig_bw_one.write_image(str(plotsdir.joinpath('bandwidth_one.png')))
+    fig_bw_one.show()
+
 
 if __name__ == '__main__':
     main()
