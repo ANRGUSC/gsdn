@@ -1,5 +1,6 @@
 import itertools
 import pathlib
+import time
 from typing import Callable, Dict, Hashable, Iterable
 
 import dgl
@@ -13,7 +14,9 @@ thisdir = pathlib.Path(__file__).parent.resolve()
 def preprocess(workflow: nx.DiGraph,
                network: nx.Graph,
                schedule: Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]):
+    t = time.time()
     sched = dict(sorted(schedule(workflow, network).items(), key=lambda x: x[0]))
+    # print('Schedule time:', time.time() - t)
     def comm_cost(src, dst, node_src, node_dst):
         if node_src == node_dst:
             return 0
@@ -45,8 +48,8 @@ class WorkflowsDataset(DGLDataset):
                  workflows: Iterable[nx.DiGraph], 
                  networks: Iterable[nx.Graph],
                  scheduler: Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]) -> None:
-        self.networks = networks
-        self.workflows = workflows
+        self.networks = list(networks)
+        self.workflows = list(workflows)
         self.scheduler = scheduler
         super().__init__(name='workflows')
 
@@ -62,12 +65,8 @@ class WorkflowsDataset(DGLDataset):
         n_nodes = 0
         self.num_classes = 0
         for i, (network, workflow) in enumerate(itertools.product(self.networks, self.workflows)):
-            print(f'Processing sample {i + 1}')
-            tasks, edges = preprocess(
-                workflow, network, 
-                lambda task, node: workflow.nodes[task]['cost'] / network.nodes[node]['cpu'],
-                self.scheduler
-            )
+            
+            tasks, edges = preprocess(workflow, network, self.scheduler)
 
             node_cost_cols = [col for col in tasks.columns if col.startswith('Cost_')]
 

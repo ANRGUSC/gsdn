@@ -15,15 +15,15 @@ thisdir = pathlib.Path(__file__).parent.resolve()
 MODEL = {
     "layer_type": "edGNNLayer",
     "layer_params": {
-        "n_units": 128,
+        "n_units": 64,
         "activation": "relu",
         "dropout": 0,
-        "n_hidden_layers": 4
+        "n_hidden_layers": 2
     }
 }
 HYPER_PARAMS = {
     'lr': 1e-3, 
-    'n_epochs': 500, 
+    'n_epochs': 300, 
     'weight_decay': 5e-3, 
     'batch_size': 128
 }

@@ -1,8 +1,11 @@
+from functools import partial
 import pathlib
-from typing import Callable, Dict, Generator, Hashable, List, Optional, Tuple
+import time
+from typing import Callable, Dict, Generator, Hashable, Iterator, List, Optional, Tuple
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -13,7 +16,7 @@ from polygenerator import random_convex_polygon, random_polygon
 from data_face_recognition import \
     gen_workflows as gen_workflows_face_recognition
 from scheduler_gcn import schedule as schedule_gcn
-from scheduler_heft import schedule as schedule_heft
+from scheduler_heft import heft, heft_rank_sort, schedule as schedule_heft
 from scheduler_rand import schedule as schedule_rand
 
 thisdir = pathlib.Path(__file__).parent.resolve()
@@ -55,46 +58,95 @@ class Polygon:
 
 def to_fully_connected(graph: nx.Graph) -> nx.Graph:
     graph = graph.copy()
-    paths = dict(nx.all_pairs_dijkstra_path_length(graph, weight=lambda u, v, d: 1/d["bandwidth"]))
+    # paths = dict(nx.all_pairs_dijkstra_path_length(graph, weight=lambda u, v, d: 1/d["bandwidth"]))
+    paths = nx.floyd_warshall_numpy(graph, weight=lambda u, v, d: 1/d["bandwidth"])
     for node1, node2 in nx.non_edges(graph):
-        bandwidth = 1 / paths[node1][node2]
+        bandwidth = 1 / paths[node1, node2]
         graph.add_edge(node1, node2, bandwidth=bandwidth)
     return graph
 
 def run_workflow(workflow: nx.DiGraph, 
                  network: nx.Graph, 
-                 schedule: Dict[Hashable, Hashable],
-                 finish_times: Optional[Dict[Hashable, float]] = None,
-                 stop_time: Optional[float] = None) -> Tuple[Dict[Hashable, float], bool]:
-    if finish_times is None:
-        finish_times = {}
-    for task in nx.topological_sort(workflow):
-        if task not in schedule:
-            raise ValueError(f"Task {task} not scheduled")
-        if task in finish_times:
-            continue # already calculated
-        parent_tasks = list(workflow.predecessors(task))
-        comm_time = max(
-            (
-                0 if schedule[parent_task] == schedule[task] else
-                workflow.edges[parent_task, task]['data']/network.edges[schedule[parent_task], schedule[task]]["bandwidth"]
-            )
-            for parent_task in parent_tasks
-        ) if parent_tasks else 0
-        # print("Comm Time for", task, "is", comm_time)
-        # print("Exec time for", task, "is", workflow.nodes[task]["cost"] / network.nodes[schedule[task]]["cpu"])
-        start_time = max(
-            finish_times[parent_task] + (
-                0 if schedule[parent_task] == schedule[task] else
-                workflow.edges[parent_task, task]['data'] / network.edges[schedule[parent_task], schedule[task]]["bandwidth"]
-            )
-            for parent_task in parent_tasks
-        ) if parent_tasks else 0
-        finish_time = start_time + workflow.nodes[task]["cost"] / network.nodes[schedule[task]]["cpu"]
-        if stop_time is not None and finish_time > stop_time:
-            return finish_times, False
-        finish_times[task] = finish_time
-    return finish_times, True
+                 stop_time: float = np.inf) -> Optional[float]:
+    """Get the makespan of a workflow on a network with a schedule.
+    
+    Args:
+        workflow: The workflow to run. 
+        network: The network to run the workflow on.
+        stop_time: The time to stop the simulation at.
+    Returns:
+        The makespan of the workflow or None if the workflow could not be completed.
+    """
+    did_action = True
+    while did_action:
+        did_action = False
+        # Continue existing executions
+        for node in network.nodes:
+            cur_task = network.nodes[node].get('task')
+            if cur_task is None: # No task running on this node
+                continue
+
+            start_time = network.nodes[node]['start_time']
+            runtime = workflow.nodes[cur_task]['cost'] / network.nodes[node]['cpu']
+            if start_time + runtime > stop_time:
+                continue # Can't finish task this timestep
+        
+            did_action = True
+            workflow.nodes[cur_task]['end_time'] = start_time + runtime
+            finish_time = start_time + runtime
+            network.nodes[node]['start_time'] = finish_time
+            network.nodes[node]['task'] = None
+
+            # Queue new communication
+            for child_task in workflow.successors(cur_task):
+                next_node = workflow.nodes[child_task]['node']
+                if next_node == node:
+                    # Add current task to ready tasks on next node
+                    network.nodes[node].setdefault('ready', {}).setdefault(child_task, {})[cur_task] = finish_time
+                else:
+                    # Add task to communication queue
+                    network.nodes[next_node].setdefault('comm_progress', {})[(cur_task, child_task)] = (0, finish_time)
+    
+        # Continue communications
+        for node in network.nodes:
+            comm_progress = network.nodes[node].get('comm_progress', {})
+            for (src_task, dst_task), (progress, last_time) in list(comm_progress.items()):
+                if last_time >= stop_time:
+                    continue # Skip if no time for more communication
+                src_task_data = workflow.edges[src_task, dst_task]['data'] - progress
+                src_node = workflow.nodes[src_task]['node']
+                comm_rate = (
+                    0 if workflow.nodes[src_task]['node'] == node else
+                    network.edges[src_node, node]['bandwidth']
+                )
+                comm_time = src_task_data / comm_rate
+                if comm_time > stop_time: # communication will continue into next time step
+                    network.nodes[node]['comm_progress'][(src_task, dst_task)] = (progress + stop_time * comm_rate, last_time)
+                else:
+                    # Add current task to ready tasks on next node
+                    did_action = True
+                    network.nodes[node].setdefault('ready', {}).setdefault(dst_task, {})[src_task] = last_time + comm_time
+                    del network.nodes[node]['comm_progress'][(src_task, dst_task)]
+        
+        # Start new executions
+        for node in network.nodes:
+            if not network.nodes[node].get('tasks', []):
+                continue # No more tasks scheduled on this node
+            if network.nodes[node].get('task') is not None:
+                continue # Task already running on this node
+            task = network.nodes[node].get('tasks', [])[-1]
+            ready: Dict[Hashable, Dict[Hashable, float]] = network.nodes[node].get('ready', {}).get(task, {})
+            task_parents = set(workflow.predecessors(task))
+            if task_parents.issubset(ready.keys()):
+                # Start task
+                did_action = True
+                network.nodes[node].get('tasks', []).pop(-1)
+                network.nodes[node]['task'] = task
+                network.nodes[node]['start_time'] = max([0, *(ready[parent] for parent in task_parents)])
+
+    if all(workflow.nodes[task].get('end_time') is not None for task in workflow.nodes):
+        return max(workflow.nodes[task]['end_time'] for task in workflow.nodes)
+    return None 
         
 class Simulation:
     def __init__(self,
@@ -117,42 +169,48 @@ class Simulation:
     def run(self, 
             rounds: Optional[int] = None,
             get_workflow: Optional[Callable[[], nx.DiGraph]] = None,
-            scheduler: Optional[Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]] = None) -> Generator[Tuple[nx.Graph, Optional[float]], None, None]:
+            scheduler: Optional[Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]]] = None,
+            topological_sort: Callable[[nx.DiGraph], Iterator[Hashable]] = lambda _, wf: nx.topological_sort(wf)) -> Generator[Tuple[nx.Graph, Optional[float]], None, None]:
         i = 0
-        if get_workflow is not None:
-            workflow = get_workflow()
-        schedule: Dict[Hashable, Hashable] = None
-        finish_times: Dict[Hashable, float] = {}
-        sim_time = 0
-        start_time = sim_time
+        sim_time = 0.0
+        workflow, network, start_time = None, None, 0.0
         while True:
             sim_time = i * self.timestep
             # move Agents and get comm network
             dists = (np.arange(0, self.polygon.perimeter, self.polygon.perimeter / self.num_agents) + sim_time) % self.polygon.perimeter
             pos = [self.polygon._get_point(d) for d in dists]
-            network = nx.Graph()
-            network.add_nodes_from([
+            
+            _network = nx.Graph()
+            _network.add_nodes_from([
                 (node, {"pos": p, "cpu": self.agent_cpus[node]}) 
                 for node, p in zip(range(self.num_agents), pos)
             ])
-            for src, dst in nx.geometric_edges(network, radius=self.radius_threshold):
+            for src, dst in nx.geometric_edges(_network, radius=self.radius_threshold):
                 d = np.sqrt((pos[src][0] - pos[dst][0]) ** 2 + (pos[src][1] - pos[dst][1]) ** 2)
-                network.add_edge(src, dst, bandwidth=self.bandwidth(d))
-            network = to_fully_connected(network)
+                _network.add_edge(src, dst, bandwidth=self.bandwidth(d))
+            _network = to_fully_connected(_network)
+
+            if network is None: # new network - new schedule
+                network = _network.copy()
+                if get_workflow is not None and scheduler is not None:
+                    start_time = sim_time
+                    workflow = get_workflow().copy()
+                    schedule = scheduler(workflow, _network)
+                    nx.set_node_attributes(workflow, {task_name: schedule[task_name] for task_name, node in schedule.items()}, 'node')
+                    for task_name in reversed(list(topological_sort(network, workflow))):
+                        network.nodes[schedule[task_name]].setdefault('tasks', []).append(task_name)
+            else: # same network - update bandwidths and positions
+                for src, dst in _network.edges:
+                    network.edges[src, dst]["bandwidth"] = _network.edges[src, dst]["bandwidth"]
+                for node in network.nodes:
+                    network.nodes[node]["pos"] = _network.nodes[node]["pos"]
 
             # Execute workflow assuming network is valid for next timestep time
             if get_workflow is not None and scheduler is not None:
-                if schedule is None:
-                    schedule = scheduler(workflow, network)
-                finish_times, success = run_workflow(
-                    workflow, network, schedule, finish_times, (sim_time-start_time)+self.timestep
-                )
-                if success:
-                    yield network, max(finish_times.values())
-                    workflow = get_workflow()
-                    schedule = None
-                    finish_times = {}
-                    start_time = sim_time
+                makespan = run_workflow(workflow, network, (sim_time-start_time)+self.timestep)
+                if makespan is not None:
+                    yield network, makespan
+                    workflow, network = None, None
                 else:
                     yield network, None
             else:
@@ -202,19 +260,20 @@ def visual_sim(sim: Simulation,
 
 def main():
     num_nodes = 10
-    timestep = 1
-    perimeter = 100
+    perimeter = 500
+    timestep = perimeter / 100 # run each simulation for 100 rounds
     n_trips = 3 # number of trips around the polygon
-    n_sims = 9 # number of simulations to run
+    n_sims = 25 # number of simulations to run
 
+    do_plots = True
+
+    rounds = int(perimeter / timestep) * n_trips
     rows = []
     bw_rows = []
     bw_one_rows = []
     for i_sim in range(n_sims):
-
         # enough rounds for robots to make a round trip
-        rounds = int(perimeter / timestep) * n_trips
-        print('Simulating for {} rounds'.format(rounds))
+        print(f'Running Simulation {i_sim+1}/{n_sims}')
 
         _vertices = random_polygon(num_nodes)
         # normalized polygon so agents traverse entire polygon in one unit of time
@@ -222,33 +281,60 @@ def main():
         _vertices = [(x/perim*perimeter, y/perim*perimeter) for x, y in _vertices]
         polygon = Polygon(_vertices)
 
-        print('Perimeter:', polygon.perimeter)
-
+        bandwidth_min = 0.2
+        curvature = 5
         sim = Simulation(
             polygon=polygon,
             agent_cpus=[1 for _ in range(num_nodes)],
             timestep=timestep,
             radius_threshold=perimeter * (1+0.01)/num_nodes,
-            bandwidth=lambda x: 1/(1 + np.exp((x/perimeter*num_nodes-1)*5))
+            bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*num_nodes/perimeter-1)*curvature)) + bandwidth_min
         )
 
         # visual_sim(sim, rounds=rounds)
         # return
 
-        workflow = gen_workflows_face_recognition(1)[0]
+        workflow = gen_workflows_face_recognition(1, n_copies=1)[0]
         first_network, _ = next(sim.run())
 
         static_sched = schedule_heft(workflow, first_network)
+
+        def heft_top_sort(network: nx.Graph, workflow: nx.DiGraph) -> List[Hashable]:
+            task_schedule, comp_schedule = heft(network, workflow) # this is LRU cached so it's fast
+            return sorted(list(task_schedule.keys()), key=lambda x: task_schedule[x].start)
         
-        sim_run_gcn = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_gcn)
-        sim_run_heft = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_heft)
-        sim_run_static = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=lambda w, n: static_sched)
-        sim_run_rand = sim.run(rounds=rounds, get_workflow=lambda: workflow, scheduler=schedule_rand)
+        rows_schedule_times = []
+        def schedule_timer(name: str, 
+                           scheduler: Callable[[nx.DiGraph, nx.Graph], Dict[Hashable, Hashable]],
+                           workflow: nx.DiGraph,
+                           network: nx.Graph) -> float:
+            start = time.time()
+            schedule = scheduler(workflow, network)
+            rows_schedule_times.append([name, time.time()-start])
+            return schedule
+
+        sim_run_gcn = sim.run(
+            rounds=rounds, get_workflow=lambda: workflow, 
+            scheduler=partial(schedule_timer, 'GCN', schedule_gcn),
+            topological_sort=heft_top_sort
+        )
+        sim_run_heft = sim.run(
+            rounds=rounds, get_workflow=lambda: workflow, 
+            scheduler=partial(schedule_timer, 'HEFT', schedule_heft), 
+            topological_sort=heft_top_sort
+        )
+        sim_run_static = sim.run(
+            rounds=rounds, get_workflow=lambda: workflow, 
+            scheduler=partial(schedule_timer, 'Static', lambda w, n: static_sched)
+        )
+        sim_run_rand = sim.run(
+            rounds=rounds, get_workflow=lambda: workflow, 
+            scheduler=partial(schedule_timer, 'Random', schedule_rand)
+        )
 
 
         i = 0
         for frame_gcn, frame_heft, frame_static, frame_rand in zip(sim_run_gcn, sim_run_heft, sim_run_static, sim_run_rand):
-            # print('Sim Time:', i*sim.timestep)
             sim_time = i * sim.timestep
             
             network, makespan_gcn = frame_gcn
@@ -267,73 +353,114 @@ def main():
             bw_one_rows.append([i_sim, sim_time, avg_bandwidth_one, std_bandwidth_one])
 
             if makespan_gcn is not None:
-                print("GCN makespan:", makespan_gcn)
                 rows.append([i_sim, sim_time, makespan_gcn, 'GCN'])
 
             if makespan_heft is not None:
-                print("HEFT makespan:", makespan_heft)
                 rows.append([i_sim, sim_time, makespan_heft, 'HEFT'])
 
             if makespan_static is not None:
-                print("Static makespan:", makespan_static)
                 rows.append([i_sim, sim_time, makespan_static, 'Static'])
 
             if makespan_rand is not None:
-                print("Random makespan:", makespan_rand)
                 rows.append([i_sim, sim_time, makespan_rand, 'Random'])
             
             i += 1
 
+    # Analysis
     savedir = thisdir.joinpath('data', 'results')
+    savedir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=['Simulation', 'Time', 'Makespan', 'Scheduler'])
     df.to_csv(savedir.joinpath('makespan.csv'), index=False)
 
+    if do_plots:
+        plotsdir = thisdir.joinpath('data', 'plots')
+        plotsdir.mkdir(exist_ok=True, parents=True)
+        plotsdir.joinpath('images').mkdir(exist_ok=True, parents=True)
+        plotsdir.joinpath('html').mkdir(exist_ok=True, parents=True)
 
-    # Plots
-    plotsdir = thisdir.joinpath('data', 'plots')	
-    plotsdir.mkdir(exist_ok=True, parents=True)
+    # # Makespan Plot
+    # if do_plots:
+    #     fig = px.scatter(
+    #         df, 
+    #         x='Time', y='Makespan', 
+    #         color='Scheduler', 
+    #         facet_col='Simulation', 
+    #         facet_col_wrap=int(np.sqrt(n_sims)),
+    #         template='plotly_white',
+    #         trendline='expanding',
+    #         color_discrete_map={ # generated using https://davidmathlogic.com/colorblind/
+    #             "HEFT": "#D81B60",
+    #             "GCN": "#1E88E5",
+    #             "Random": "#FFC107",
+    #             "Static": "#004D40",
+    #         }
+    #         # trendline_options=dict(window=3)
+    #     )
+    #     fig.write_image(str(plotsdir.joinpath('images', 'makespan.png')))
+    #     fig.write_html(str(plotsdir.joinpath('html', 'makespan.html')))
 
-    # Makespan Plot
-    fig = px.scatter(
-        df, 
-        x='Time', y='Makespan', 
-        color='Scheduler', 
-        facet_col='Simulation', 
-        facet_col_wrap=int(np.sqrt(n_sims)),
-        template='plotly_white',
-        trendline='expanding',
-        # trendline_options=dict(window=3)
-    )
-    fig.write_image(str(plotsdir.joinpath('makespan.png')))
-    fig.show()
+    # # Bandwidth Plot
+    # df_bw = pd.DataFrame(bw_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    # df_bw.to_csv(savedir.joinpath('bandwidth.csv'), index=False)
+    # if do_plots:
+    #     fig_bw = px.line(
+    #         df_bw, 
+    #         x='Time', y='Avg Bandwidth', 
+    #         error_y='Std Bandwidth',
+    #         facet_col='Simulation', 
+    #         facet_col_wrap=int(np.sqrt(n_sims)),
+    #         template='plotly_white'
+    #     )
+    #     fig_bw.write_image(str(plotsdir.joinpath('images', 'bandwidth.png')))
+    #     fig_bw.write_html(str(plotsdir.joinpath('html', 'bandwidth.html')))
 
-    # Bandwidth Plot
-    df_bw = pd.DataFrame(bw_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
-    df_bw.to_csv(savedir.joinpath('bandwidth.csv'), index=False)
-    fig_bw = px.scatter(
-        df_bw, 
-        x='Time', y='Avg Bandwidth', 
-        error_y='Std Bandwidth',
-        facet_col='Simulation', 
-        facet_col_wrap=int(np.sqrt(n_sims)),
-        template='plotly_white'
-    )
-    fig_bw.write_image(str(plotsdir.joinpath('bandwidth.png')))
-    fig_bw.show()
+    # # Single Node Bandwidth Plot
+    # df_bw_one = pd.DataFrame(bw_one_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    # df_bw_one.to_csv(savedir.joinpath('bandwidth_one.csv'), index=False)
+    # if do_plots:
+    #     fig_bw_one = px.line(
+    #         df_bw_one,
+    #         x='Time', y='Avg Bandwidth',
+    #         error_y='Std Bandwidth',
+    #         facet_col='Simulation',
+    #         facet_col_wrap=int(np.sqrt(n_sims)),
+    #         template='plotly_white'
+    #     )
+    #     fig_bw_one.write_image(str(plotsdir.joinpath('images', 'bandwidth_one.png')))
+    #     fig_bw_one.write_html(str(plotsdir.joinpath('html', 'bandwidth_one.html')))
 
-    # Single Node Bandwidth Plot
-    df_bw_one = pd.DataFrame(bw_one_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
-    df_bw_one.to_csv(savedir.joinpath('bandwidth_one.csv'), index=False)
-    fig_bw_one = px.scatter(
-        df_bw_one,
-        x='Time', y='Avg Bandwidth',
-        error_y='Std Bandwidth',
-        facet_col='Simulation',
-        facet_col_wrap=int(np.sqrt(n_sims)),
-        template='plotly_white'
-    )
-    fig_bw_one.write_image(str(plotsdir.joinpath('bandwidth_one.png')))
-    fig_bw_one.show()
+    # # Schedule Times
+    # df_schedule_times = pd.DataFrame(rows_schedule_times, columns=['Scheduler', 'Time'])
+    # df_schedule_times.to_csv(savedir.joinpath('schedule_times.csv'), index=False)
+    # if do_plots:
+    #     fig_schedule_times = px.violin(
+    #         df_schedule_times,
+    #         x='Scheduler', y='Time',
+    #         template='plotly_white'
+    #     )
+    #     fig_schedule_times.write_image(str(plotsdir.joinpath('images', 'schedule_times.png')))
+    #     fig_schedule_times.write_html(str(plotsdir.joinpath('html', 'schedule_times.html')))
+
+    # Average Makespans
+    df_mean = df.drop(columns=['Time']).groupby(['Scheduler', 'Simulation']).mean().reset_index()
+    df_mean = df_mean.set_index('Simulation').sort_index()
+    df_mean = df_mean.pivot_table(values='Makespan', index='Simulation', columns='Scheduler')
+    df_mean = df_mean.div(df_mean['HEFT'], axis=0)
+    df_mean.to_csv(savedir.joinpath('makespan_mean.csv'))
+    
+    if do_plots:
+        fig = go.Figure()
+        for scheduler in ['GCN', 'Static', 'Random']:
+            fig.add_trace(go.Violin(
+                # x=scheduler,
+                y=df_mean[scheduler],
+                name=scheduler,
+                box_visible=True,
+                meanline_visible=True
+            ))
+        fig.write_image(str(plotsdir.joinpath('images', 'makespan_mean.png')))
+        fig.write_html(str(plotsdir.joinpath('html', 'makespan_mean.html')))
+
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 import itertools
 import pathlib
 import random
-from typing import Generator, Iterator
+from typing import Dict, Generator, Hashable, Iterator
 
 import dill as pickle
 import networkx as nx
@@ -12,7 +12,7 @@ from polygenerator import random_convex_polygon, random_polygon
 
 from data_face_recognition import gen_workflows as gen_workflows_face_recognition
 from dataset import WorkflowsDataset
-from scheduler_heft import schedule as schedule_heft
+from scheduler_heft import heft, schedule as schedule_heft
 from scheduler_rand import schedule as schedule_rand
 from simulate import Polygon, Simulation, run_workflow, to_fully_connected
 
@@ -42,12 +42,16 @@ def gen_networks(n_networks: int,
         perim = Polygon(_vertices).perimeter
         _vertices = [(x/perim, y/perim) for x, y in _vertices]
         polygon = Polygon(_vertices)
+
+        perimeter = polygon.perimeter
+        bandwidth_min = 0.2
+        curvature = 5
         sim = Simulation(
             polygon=polygon,
             agent_cpus=np.ones(n_nodes),# [np.random.triangular(1/2, 1, 3/2) for _ in range(n_nodes)],
             timestep=1/n_sim_rounds, # take networks spread evenly over one unit of time
             radius_threshold=(1+0.01)/n_nodes, # radius of communication
-            bandwidth=lambda x: 1/(1 + np.exp((x*n_nodes-1)*5)), # sigmoid function
+            bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*n_nodes/perimeter-1)*curvature)) + bandwidth_min
         )
         # visual_sim(sim)
         for network, _ in sim.run(rounds=n_sim_rounds):
@@ -60,25 +64,40 @@ def gen_samples(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGraph]) -
     data = WorkflowsDataset(networks=networks, workflows=workflows, scheduler=schedule_heft)
     out_folder.joinpath('data.pkl').write_bytes(pickle.dumps(data))
 
+def apply_schedule(workflow: nx.DiGraph, 
+                   network: nx.Graph, 
+                   schedule: Dict[Hashable, Hashable],
+                   task_order: Iterator[Hashable]) -> None:
+        nx.set_node_attributes(
+            workflow, 
+            {
+                task_name: schedule[task_name] 
+                for task_name, node in schedule.items()
+            }, 
+            'node'
+        )
+        for task_name in reversed(list(task_order)):
+            network.nodes[schedule[task_name]].setdefault('tasks', []).append(task_name)
+
 def validate_dataset(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGraph]) -> None:
     rows = []
     for i, (network, workflow) in enumerate(itertools.product(networks, workflows)):
         print(f'Sample {i+1}')
         heft_sched = schedule_heft(workflow, network)
-        # print(f'HEFT schedule: {heft_sched}')
-        finish_times, _ = run_workflow(workflow, network, heft_sched)
-        heft_makespan = max(finish_times.values())
 
-        rand_makespan = np.mean(
-            [
-                max(
-                    run_workflow(
-                        workflow, network, schedule_rand(workflow, network)
-                    )[0].values()
-                )
-                for _ in range(10)
-            ]
-        )
+        task_schedule, comp_schedule = heft(network, workflow) # this is LRU cached so it's fast
+        task_order = sorted(list(task_schedule.keys()), key=lambda x: task_schedule[x].start)
+        apply_schedule(workflow, network, heft_sched, task_order)
+        heft_makespan = run_workflow(workflow.copy(), network.copy())
+
+        rand_makespans = []
+        for _ in range(10):
+            rand_sched = schedule_rand(workflow, network)
+            task_order = nx.topological_sort(workflow)
+            apply_schedule(workflow, network, rand_sched, task_order)
+            rand_makespans.append(run_workflow(workflow.copy(), network.copy()))
+            
+        rand_makespan = np.mean(rand_makespans)
 
         rows.append([i, heft_makespan, rand_makespan])
 
@@ -92,18 +111,18 @@ def validate_dataset(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGrap
 def main():
     n_networks = 50
     n_sim_rounds = 1
-    n_workflows = 1
-    n_nodes = 100
+    n_workflows = 5
+    n_nodes = 10
 
     print(f'Generating {n_networks * n_sim_rounds * n_workflows} samples')
     networks = gen_networks(
         n_networks=n_networks, n_sim_rounds=n_sim_rounds, 
         n_nodes=n_nodes, min_vertices=3, max_vertices=10
     )
-    workflows = gen_workflows_face_recognition(n_workflows)
+    workflows = gen_workflows_face_recognition(n_workflows, n_copies=1)
 
-    # gen_samples(networks, workflows)
-    validate_dataset(networks, workflows)
+    gen_samples(networks, workflows)
+    # validate_dataset(networks, workflows)
 
 if __name__ == '__main__':
     main()
