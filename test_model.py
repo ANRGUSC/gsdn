@@ -11,14 +11,15 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import torch
+import networkx as nx
 
-from data_face_recognition import \
-    gen_workflows as gen_workflows_face_recognition
+from data_face_recognition import gen_workflows as gen_workflows_face_recognition
+from data_epigenomics import gen_workflows as gen_workflows_epigenomics
 from preprocess import gen_networks
 from scheduler_gcn import schedule as schedule_gcn
-from scheduler_heft import schedule as schedule_heft
+from scheduler_heft import schedule as schedule_heft, heft
 from scheduler_rand import schedule as schedule_rand
-from simulate import run_workflow
+from simulate import run_workflow, load_dataset_workflows, load_dataset_networks
 
 thisdir = pathlib.Path(__file__).parent.resolve()
 
@@ -51,12 +52,13 @@ def evaluate_model() -> None:
     n_networks = 50
     n_sim_rounds = 1
     n_workflows = 1
-    print(f'Generating {n_networks * n_sim_rounds * n_workflows} samples')
-    networks = gen_networks(
-        n_networks=n_networks, n_sim_rounds=n_sim_rounds, 
-        n_nodes=10, min_vertices=3, max_vertices=10
-    )
-    workflows = gen_workflows_face_recognition(n_workflows)
+    n_nodes = 10
+
+    networks = gen_networks(n_networks, n_sim_rounds, n_nodes=n_nodes)
+    _, _, _, networks = load_dataset_networks()
+    # workflows = gen_workflows_face_recognition(n_workflows, n_copies=1)
+    # workflows = gen_workflows_epigenomics(n_workflows, n_copies=1)
+    workflows, *_ = load_dataset_workflows()
     # workflows = gen_workflows_wfchef(
     #     n_workflows=n_workflows, 
     #     recipe_name='epigenomics', 
@@ -64,37 +66,51 @@ def evaluate_model() -> None:
     # )
 
     rows = []
-    for i, (network, workflow) in enumerate(itertools.product(networks, workflows)):
+    for i, (_network, _workflow) in enumerate(itertools.product(networks, workflows)):
         # Schedule with HEFT
-        heft_sched = schedule_heft(workflow, network)
-        print("HEFT SCHED", dict(sorted(heft_sched.items())))
-        finish_times, _ = run_workflow(workflow, network, heft_sched)
-        heft_makespan = max(finish_times.values())
+        task_schedule, comp_schedule = heft(_network, _workflow)
+        heft_sched = {task.name: task.node for task in task_schedule.values()}
+        # print(f'HEFT: {heft_sched}')
+
+        network = _network.copy()
+        workflow = _workflow.copy()
+        nx.set_node_attributes(workflow, {task_name: node for task_name, node in heft_sched.items()}, 'node')
+        for task_name in reversed(sorted(list(task_schedule.keys()), key=lambda x: task_schedule[x].start)):
+            network.nodes[heft_sched[task_name]].setdefault('tasks', []).append(task_name)
+        heft_makespan = run_workflow(workflow, network)
 
         # Schedule with GCNScheduler
+        network = _network.copy()
+        workflow = _workflow.copy()
         gcn_sched = schedule_gcn(workflow, network)
-        print("GCN SCHED", dict(sorted(gcn_sched.items())))
-        finish_times, _ = run_workflow(workflow, network, gcn_sched)
-        gcn_makespan = max(finish_times.values())
+        # print(f'GCN: {gcn_sched}')
+
+        nx.set_node_attributes(workflow, {task_name: node for task_name, node in gcn_sched.items()}, 'node')
+        for task_name in reversed(list(nx.topological_sort(workflow))):
+            network.nodes[gcn_sched[task_name]].setdefault('tasks', []).append(task_name)
+
+        # print("GCN SCHED", dict(sorted(gcn_sched.items())))
+        gcn_makespan = run_workflow(workflow, network)
 
         # Get GCNScheduler Accuracy
         accuracy = sum(
             1 if heft_sched[task] == gcn_sched[task] else 0 
             for task in gcn_sched.keys()
-        ) / len(workflow.nodes)
+        ) / len(gcn_sched)
 
         # Schedule with Random Scheduler (for 10 trials)
-        rand_makespan = np.mean(
-            [
-                max(
-                    run_workflow(
-                        workflow, network, schedule_rand(workflow, network)
-                    )[0].values()
-                )
-                for _ in range(10)
-            ]
-        )
+        rand_makespans = []
+        for _ in range(10):
+            rand_sched = schedule_rand(workflow, network)
+            network = _network.copy()
+            workflow = _workflow.copy()
+            nx.set_node_attributes(workflow, {task_name: node for task_name, node in rand_sched.items()}, 'node')
+            for task_name in reversed(list(nx.topological_sort(workflow))):
+                network.nodes[rand_sched[task_name]].setdefault('tasks', []).append(task_name)
 
+            rand_makespans.append(run_workflow(workflow, network))
+
+        rand_makespan = np.mean(rand_makespans) 
         rows.append([i, heft_makespan, rand_makespan, gcn_makespan, accuracy])
 
     df = pd.DataFrame(rows, columns=['sample', 'HEFT', 'Random', 'GCNScheduler', 'accuracy'])

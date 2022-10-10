@@ -99,4 +99,4 @@ def schedule(workflow: nx.DiGraph, network: nx.Graph) -> Dict[Hashable, Hashable
             Dict[Hashable, Hashable]: Mapping from task to node
     """
     task_schedule, comp_schedule = heft(network, workflow)
-    return {task.name: node for node, tasks in comp_schedule.items() for task in tasks}
+    return {task.name: task.node for task in task_schedule.values()}

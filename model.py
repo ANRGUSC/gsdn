@@ -11,7 +11,13 @@ import torch.nn.functional as F
 from edgnn import edGNNLayer
 
 ACTIVATIONS = {
-    'relu': F.relu
+    'relu': F.relu,
+    'sigmoid': torch.sigmoid,
+    'tanh': torch.tanh,
+    'leaky_relu': F.leaky_relu,
+    'elu': F.elu,
+    'selu': F.selu,
+    'gelu': F.gelu,
 }
 
 def layer_build_args(node_dim, edge_dim, n_classes, layer_params):
@@ -107,12 +113,10 @@ class Model(nn.Module):
 
         # 1. Build node features
         node_features = self.g.ndata['node_features'].float()
-        # node_features = self.g.ndata['labels'].repeat(10, 1).T.float()
         node_features = node_features.cuda() if self.is_cuda else node_features
 
         # 2. Build edge features
         edge_features = self.g.edata['edge_features'].float()
-        # edge_features = torch.ones_like(self.g.edata['edge_features']).float()
         edge_features = edge_features.cuda() if self.is_cuda else edge_features
 
         # 3. Iterate over each layer

@@ -1,3 +1,4 @@
+from calendar import different_locale
 import itertools
 import pathlib
 import random
@@ -11,6 +12,7 @@ import plotly.express as px
 from polygenerator import random_convex_polygon, random_polygon
 
 from data_face_recognition import gen_workflows as gen_workflows_face_recognition
+from data_epigenomics import gen_workflows as gen_workflows_epigenomics
 from dataset import WorkflowsDataset
 from scheduler_heft import heft, schedule as schedule_heft
 from scheduler_rand import schedule as schedule_rand
@@ -21,7 +23,7 @@ thisdir = pathlib.Path(__file__).parent.resolve()
 def gen_networks(n_networks: int,
                  n_sim_rounds: int,
                  n_nodes: int,
-                 min_vertices: int = 3, 
+                 min_vertices: int = 7, 
                  max_vertices: int = 10) -> Generator[nx.Graph, None, None]:
     """Generate n_networks * n_sim_rounds networks with n_nodes nodes
     
@@ -43,25 +45,34 @@ def gen_networks(n_networks: int,
         _vertices = [(x/perim, y/perim) for x, y in _vertices]
         polygon = Polygon(_vertices)
 
+        agent_cpus = np.ones(n_nodes)
+        # agent_cpus = np.ones(n_nodes) + np.random.uniform(0, 0.2, n_nodes)
+        # agent_cpus = np.random.triangular(1/2, 1, 3/2, n_nodes)
+        # agent_cpus = np.zeros(n_nodes) + 1/100
+        # agent_cpus[np.random.randint(0, n_nodes)] = 1
+
         perimeter = polygon.perimeter
         bandwidth_min = 0.2
         curvature = 5
         sim = Simulation(
             polygon=polygon,
-            agent_cpus=np.ones(n_nodes),# [np.random.triangular(1/2, 1, 3/2) for _ in range(n_nodes)],
+            agent_cpus=agent_cpus,
             timestep=1/n_sim_rounds, # take networks spread evenly over one unit of time
             radius_threshold=(1+0.01)/n_nodes, # radius of communication
             bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*n_nodes/perimeter-1)*curvature)) + bandwidth_min
         )
         # visual_sim(sim)
         for network, _ in sim.run(rounds=n_sim_rounds):
-            print('Generated network')
             yield to_fully_connected(network)
 
 def gen_samples(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGraph]) -> None:
     out_folder = thisdir.joinpath('data')
     out_folder.mkdir(exist_ok=True, parents=True)
-    data = WorkflowsDataset(networks=networks, workflows=workflows, scheduler=schedule_heft)
+    data = WorkflowsDataset(
+        networks=networks, 
+        workflows=workflows, 
+        scheduler=schedule_heft
+    )
     out_folder.joinpath('data.pkl').write_bytes(pickle.dumps(data))
 
 def apply_schedule(workflow: nx.DiGraph, 
@@ -109,17 +120,14 @@ def validate_dataset(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGrap
 
 
 def main():
-    n_networks = 50
+    n_networks = 200
     n_sim_rounds = 1
-    n_workflows = 5
+    n_workflows = 20
     n_nodes = 10
 
-    print(f'Generating {n_networks * n_sim_rounds * n_workflows} samples')
-    networks = gen_networks(
-        n_networks=n_networks, n_sim_rounds=n_sim_rounds, 
-        n_nodes=n_nodes, min_vertices=3, max_vertices=10
-    )
-    workflows = gen_workflows_face_recognition(n_workflows, n_copies=1)
+    networks = gen_networks(n_networks, n_sim_rounds, n_nodes)
+    # workflows = gen_workflows_face_recognition(n_workflows, n_copies=1)
+    workflows = list(gen_workflows_epigenomics(n_workflows, n_copies=1))
 
     gen_samples(networks, workflows)
     # validate_dataset(networks, workflows)

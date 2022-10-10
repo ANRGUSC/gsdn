@@ -1,5 +1,6 @@
 from functools import partial
 import pathlib
+import random
 import time
 from typing import Callable, Dict, Generator, Hashable, Iterator, List, Optional, Tuple
 
@@ -12,14 +13,24 @@ import pandas as pd
 import plotly.express as px
 from matplotlib.animation import FuncAnimation
 from polygenerator import random_convex_polygon, random_polygon
+import dill as pickle
 
-from data_face_recognition import \
-    gen_workflows as gen_workflows_face_recognition
+from data_face_recognition import gen_workflows as gen_workflows_face_recognition
+from data_epigenomics import gen_workflows as gen_workflows_epigenomics
+from dataset import WorkflowsDataset
 from scheduler_gcn import schedule as schedule_gcn
 from scheduler_heft import heft, heft_rank_sort, schedule as schedule_heft
 from scheduler_rand import schedule as schedule_rand
 
 thisdir = pathlib.Path(__file__).parent.resolve()
+
+def load_dataset_workflows() -> Tuple[List[nx.DiGraph], List[nx.DiGraph], List[nx.DiGraph], List[nx.DiGraph]]:
+    data: WorkflowsDataset = pickle.loads(thisdir.joinpath('data', 'data.pkl').read_bytes())
+    return list(data.workflows), list(data.train_workflows), list(data.val_workflows), list(data.test_workflows)
+
+def load_dataset_networks() -> Tuple[List[nx.Graph], List[nx.Graph], List[nx.Graph], List[nx.Graph]]:
+    data: WorkflowsDataset = pickle.loads(thisdir.joinpath('data', 'data.pkl').read_bytes())
+    return list(data.networks), list(data.train_networks), list(data.val_networks), list(data.test_networks)
 
 class Polygon:
     def __init__(self, points: List[Tuple[float, float]]) -> None:
@@ -59,9 +70,11 @@ class Polygon:
 def to_fully_connected(graph: nx.Graph) -> nx.Graph:
     graph = graph.copy()
     # paths = dict(nx.all_pairs_dijkstra_path_length(graph, weight=lambda u, v, d: 1/d["bandwidth"]))
-    paths = nx.floyd_warshall_numpy(graph, weight=lambda u, v, d: 1/d["bandwidth"])
+    # paths = nx.floyd_warshall_numpy(graph, weight=lambda u, v, d: 1/d["bandwidth"])
+    # paths = nx.all_pairs_shortest_path_length(graph, weight=lambda u, v, d: 1/d["bandwidth"])
     for node1, node2 in nx.non_edges(graph):
-        bandwidth = 1 / paths[node1, node2]
+        shortest_path_length = nx.shortest_path_length(graph, node1, node2, weight=lambda u, v, d: 1/d["bandwidth"])
+        bandwidth = 1 / shortest_path_length
         graph.add_edge(node1, node2, bandwidth=bandwidth)
     return graph
 
@@ -142,7 +155,11 @@ def run_workflow(workflow: nx.DiGraph,
                 did_action = True
                 network.nodes[node].get('tasks', []).pop(-1)
                 network.nodes[node]['task'] = task
-                network.nodes[node]['start_time'] = max([0, *(ready[parent] for parent in task_parents)])
+                network.nodes[node]['start_time'] = max([
+                    network.nodes[node].get('start_time', 0.0), 
+                    *(ready[parent] for parent in task_parents)
+                ])
+                workflow.nodes[task]['start_time'] = network.nodes[node]['start_time']
 
     if all(workflow.nodes[task].get('end_time') is not None for task in workflow.nodes):
         return max(workflow.nodes[task]['end_time'] for task in workflow.nodes)
@@ -263,7 +280,7 @@ def main():
     perimeter = 500
     timestep = perimeter / 100 # run each simulation for 100 rounds
     n_trips = 3 # number of trips around the polygon
-    n_sims = 25 # number of simulations to run
+    n_sims = 6 # number of simulations to run
 
     do_plots = True
 
@@ -285,7 +302,7 @@ def main():
         curvature = 5
         sim = Simulation(
             polygon=polygon,
-            agent_cpus=[1 for _ in range(num_nodes)],
+            agent_cpus=np.ones(num_nodes),
             timestep=timestep,
             radius_threshold=perimeter * (1+0.01)/num_nodes,
             bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*num_nodes/perimeter-1)*curvature)) + bandwidth_min
@@ -294,7 +311,10 @@ def main():
         # visual_sim(sim, rounds=rounds)
         # return
 
-        workflow = gen_workflows_face_recognition(1, n_copies=1)[0]
+        # workflow = gen_workflows_face_recognition(1, n_copies=1)[0]
+        # workflow = gen_workflows_epigenomics(1, n_copies=1)[0]
+        *_, workflows = load_dataset_workflows()
+        workflow = random.choice(workflows)
         first_network, _ = next(sim.run())
 
         static_sched = schedule_heft(workflow, first_network)
@@ -372,74 +392,76 @@ def main():
     df = pd.DataFrame(rows, columns=['Simulation', 'Time', 'Makespan', 'Scheduler'])
     df.to_csv(savedir.joinpath('makespan.csv'), index=False)
 
+    print(df)
+
     if do_plots:
         plotsdir = thisdir.joinpath('data', 'plots')
         plotsdir.mkdir(exist_ok=True, parents=True)
         plotsdir.joinpath('images').mkdir(exist_ok=True, parents=True)
         plotsdir.joinpath('html').mkdir(exist_ok=True, parents=True)
 
-    # # Makespan Plot
-    # if do_plots:
-    #     fig = px.scatter(
-    #         df, 
-    #         x='Time', y='Makespan', 
-    #         color='Scheduler', 
-    #         facet_col='Simulation', 
-    #         facet_col_wrap=int(np.sqrt(n_sims)),
-    #         template='plotly_white',
-    #         trendline='expanding',
-    #         color_discrete_map={ # generated using https://davidmathlogic.com/colorblind/
-    #             "HEFT": "#D81B60",
-    #             "GCN": "#1E88E5",
-    #             "Random": "#FFC107",
-    #             "Static": "#004D40",
-    #         }
-    #         # trendline_options=dict(window=3)
-    #     )
-    #     fig.write_image(str(plotsdir.joinpath('images', 'makespan.png')))
-    #     fig.write_html(str(plotsdir.joinpath('html', 'makespan.html')))
+    # Makespan Plot
+    if do_plots:
+        fig = px.scatter(
+            df, 
+            x='Time', y='Makespan', 
+            color='Scheduler', 
+            facet_col='Simulation', 
+            facet_col_wrap=int(np.sqrt(n_sims)),
+            template='plotly_white',
+            trendline='expanding',
+            color_discrete_map={ # generated using https://davidmathlogic.com/colorblind/
+                "HEFT": "#D81B60",
+                "GCN": "#1E88E5",
+                "Random": "#FFC107",
+                "Static": "#004D40",
+            }
+            # trendline_options=dict(window=3)
+        )
+        fig.write_image(str(plotsdir.joinpath('images', 'makespan.png')))
+        fig.write_html(str(plotsdir.joinpath('html', 'makespans.html')))
 
-    # # Bandwidth Plot
-    # df_bw = pd.DataFrame(bw_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
-    # df_bw.to_csv(savedir.joinpath('bandwidth.csv'), index=False)
-    # if do_plots:
-    #     fig_bw = px.line(
-    #         df_bw, 
-    #         x='Time', y='Avg Bandwidth', 
-    #         error_y='Std Bandwidth',
-    #         facet_col='Simulation', 
-    #         facet_col_wrap=int(np.sqrt(n_sims)),
-    #         template='plotly_white'
-    #     )
-    #     fig_bw.write_image(str(plotsdir.joinpath('images', 'bandwidth.png')))
-    #     fig_bw.write_html(str(plotsdir.joinpath('html', 'bandwidth.html')))
+    # Bandwidth Plot
+    df_bw = pd.DataFrame(bw_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    df_bw.to_csv(savedir.joinpath('bandwidth.csv'), index=False)
+    if do_plots:
+        fig_bw = px.line(
+            df_bw, 
+            x='Time', y='Avg Bandwidth', 
+            error_y='Std Bandwidth',
+            facet_col='Simulation', 
+            facet_col_wrap=int(np.sqrt(n_sims)),
+            template='plotly_white'
+        )
+        fig_bw.write_image(str(plotsdir.joinpath('images', 'bandwidth.png')))
+        fig_bw.write_html(str(plotsdir.joinpath('html', 'bandwidth.html')))
 
-    # # Single Node Bandwidth Plot
-    # df_bw_one = pd.DataFrame(bw_one_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
-    # df_bw_one.to_csv(savedir.joinpath('bandwidth_one.csv'), index=False)
-    # if do_plots:
-    #     fig_bw_one = px.line(
-    #         df_bw_one,
-    #         x='Time', y='Avg Bandwidth',
-    #         error_y='Std Bandwidth',
-    #         facet_col='Simulation',
-    #         facet_col_wrap=int(np.sqrt(n_sims)),
-    #         template='plotly_white'
-    #     )
-    #     fig_bw_one.write_image(str(plotsdir.joinpath('images', 'bandwidth_one.png')))
-    #     fig_bw_one.write_html(str(plotsdir.joinpath('html', 'bandwidth_one.html')))
+    # Single Node Bandwidth Plot
+    df_bw_one = pd.DataFrame(bw_one_rows, columns=['Simulation', 'Time', 'Avg Bandwidth', 'Std Bandwidth'])
+    df_bw_one.to_csv(savedir.joinpath('bandwidth_one.csv'), index=False)
+    if do_plots:
+        fig_bw_one = px.line(
+            df_bw_one,
+            x='Time', y='Avg Bandwidth',
+            error_y='Std Bandwidth',
+            facet_col='Simulation',
+            facet_col_wrap=int(np.sqrt(n_sims)),
+            template='plotly_white'
+        )
+        fig_bw_one.write_image(str(plotsdir.joinpath('images', 'bandwidth_one.png')))
+        fig_bw_one.write_html(str(plotsdir.joinpath('html', 'bandwidth_one.html')))
 
-    # # Schedule Times
-    # df_schedule_times = pd.DataFrame(rows_schedule_times, columns=['Scheduler', 'Time'])
-    # df_schedule_times.to_csv(savedir.joinpath('schedule_times.csv'), index=False)
-    # if do_plots:
-    #     fig_schedule_times = px.violin(
-    #         df_schedule_times,
-    #         x='Scheduler', y='Time',
-    #         template='plotly_white'
-    #     )
-    #     fig_schedule_times.write_image(str(plotsdir.joinpath('images', 'schedule_times.png')))
-    #     fig_schedule_times.write_html(str(plotsdir.joinpath('html', 'schedule_times.html')))
+    # Schedule Times
+    df_schedule_times = pd.DataFrame(rows_schedule_times, columns=['Scheduler', 'Time'])
+    df_schedule_times.to_csv(savedir.joinpath('schedule_times.csv'), index=False)
+    if do_plots:
+        fig_schedule_times = px.violin(
+            df_schedule_times,
+            x='Scheduler', y='Time',
+            template='plotly_white'
+        )
+        fig_schedule_times.write_image(str(plotsdir.joinpath('images', 'schedule_times.png')))
+        fig_schedule_times.write_html(str(plotsdir.joinpath('html', 'schedule_times.html')))
 
     # Average Makespans
     df_mean = df.drop(columns=['Time']).groupby(['Scheduler', 'Simulation']).mean().reset_index()
@@ -458,6 +480,7 @@ def main():
                 box_visible=True,
                 meanline_visible=True
             ))
+        
         fig.write_image(str(plotsdir.joinpath('images', 'makespan_mean.png')))
         fig.write_html(str(plotsdir.joinpath('html', 'makespan_mean.html')))
 

@@ -35,7 +35,7 @@ def gen_workflows(n_workflows: int, n_copies: int) -> List[nx.DiGraph]:
                 workflow.add_node(task_id, cost=cost)
             for task_id in dic_task_graph:
                 for child in dic_task_graph[task_id]:
-                    data = 1 # max(max(0, np.random.normal(1, scale=1/2)), 2)
+                    data = 0 #1/2# max(max(0, np.random.normal(1, scale=1/2)), 2)
                     workflow.add_edge(task_id, child, data=data)
         workflows.append(workflow)
     return workflows

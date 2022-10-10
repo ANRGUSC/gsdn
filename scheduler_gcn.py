@@ -10,6 +10,7 @@ import torch
 from dataset import preprocess
 from model import Model
 from train import MODEL
+from scheduler_heft import schedule as schedule_heft
 
 thisdir = pathlib.Path(__file__).parent.resolve()
 
@@ -22,14 +23,19 @@ def format_data(tasks: pd.DataFrame, edges: pd.DataFrame) -> dgl.DGLGraph:
     
     edge_cost_cols = [col for col in edges.columns if col.startswith('Cost_')]
     edge_features = torch.from_numpy(edges[edge_cost_cols].to_numpy())
+    
+    # normalize features
+    max_feature = max(node_features.max(), edge_features.max())
+    min_feature = min(node_features.min(), edge_features.min())
+    node_features = (node_features - min_feature) / (max_feature - min_feature)
+    edge_features = (edge_features - min_feature) / (max_feature - min_feature)
 
+    # Create Graph
     graph = dgl.graph((edges_src, edges_dst), num_nodes=len(tasks))
     graph.ndata['node_features'] = node_features
     graph.edata['edge_features'] = edge_features
-
     node_labels = torch.from_numpy(tasks['task_label'].to_numpy())
     graph.ndata['labels'] = node_labels
-    
     return graph
 
 @lru_cache(maxsize=1)
@@ -46,20 +52,15 @@ def schedule(workflow: nx.DiGraph,
 
         Returns:
             Dict[Hashable, Hashable]: Mapping from task to node
-    """        # Preprocess data and schedule with HEFT
-    dummy_schedule = lambda *_: {task: 0 for task in workflow.nodes}
+    """
+    dummy_schedule = schedule_heft #  lambda *_: {task: 0 for task in workflow.nodes}
     tasks, edges = preprocess(workflow, network, schedule=dummy_schedule)
-    
-    task_ids = {task: i for i, task in enumerate(tasks['task'])}
-    r_task_ids = {i: task for task, i in task_ids.items()}
-
     graph = format_data(tasks, edges)
     config_params = {
         **MODEL,
         "edge_dim": network.number_of_nodes()**2,
         "node_dim": network.number_of_nodes()
     }
-
     model = Model(
         g=graph,
         config_params=config_params,
@@ -67,8 +68,10 @@ def schedule(workflow: nx.DiGraph,
         is_cuda=False
     )
     model.load_state_dict(load_weights())
+    # acc, loss = model.eval(graph.ndata['labels'], mask=torch.ones(graph.number_of_nodes(), dtype=torch.bool))
+    # print(f'Accuracy: {acc:.4f}, Loss: {loss:.4f}')
     with torch.no_grad():
         logits = model(None)
         _, indices = torch.max(logits, dim=1)
 
-    return {r_task_ids[i]: node for i, node in enumerate(indices.tolist())}
+    return dict(enumerate(indices.tolist()))
