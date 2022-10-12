@@ -2,7 +2,7 @@ image: mcr.microsoft.com/vscode/devcontainers/miniconda:0-3
 tasks:
   - name: Create conda environment
     init: |
-      sudo apt update && sudo apt install libgraphviz-dev
+      sudo apt update && sudo apt install -y libgraphviz-dev
       conda env create --file ./environment.yml
       echo "conda activate gsdn" >> /home/gitpod/.bashrc
       conda init
