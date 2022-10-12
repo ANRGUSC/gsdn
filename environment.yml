@@ -138,4 +138,3 @@ dependencies:
     - kaleido==0.2.1
     - polygenerator==0.2.0
     - pygraphviz==1.10
-prefix: /home/jaredraycoleman/miniconda3/envs/gsdn3
