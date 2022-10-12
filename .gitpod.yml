@@ -3,9 +3,11 @@ tasks:
   - name: Create conda environment
     init: |
       sudo apt update && sudo apt install -y libgraphviz-dev
+      conda init
       conda env create --file ./environment.yml
       echo "conda activate gsdn" >> /home/gitpod/.bashrc
-      conda init
+
+      echo "Finished installation. Close this terminal and open a new one!"
 
 # --------------------------------------------------------
 # some useful extensions to have
