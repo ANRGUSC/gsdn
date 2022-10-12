@@ -6,7 +6,7 @@
 # work, else it fails with a very cryptic message
 # -------------------------------------------------------------------------
 
-image: scipy/scipy-gitpod:latest
+image: mcr.microsoft.com/vscode/devcontainers/miniconda:0-3
 # tasks:
 #   - name: Prepare development
 #     init: |
