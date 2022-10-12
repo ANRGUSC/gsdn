@@ -1,31 +1,11 @@
-# Rebuilding SciPy on init - rather than on prebuild: this ensures
-# that even forks do have a usable freshly built SciPy
-# Might delegate this later to prebuild with Q2 improvements on gitpod
-# https://www.gitpod.io/docs/config-start-tasks/#configuring-the-terminal
-# please note that the conda env *must* be activated again for ccache to
-# work, else it fails with a very cryptic message
-# -------------------------------------------------------------------------
-
 image: mcr.microsoft.com/vscode/devcontainers/miniconda:0-3
-# tasks:
-#   - name: Prepare development
-#     init: |
-#       mkdir -p .vscode
-#       cp tools/docker_dev/settings.json .vscode/settings.json
-#       conda activate scipy-meson
-#       git submodule update --init
-#       python dev.py --build-only -j2
-#       echo "🛠 Completed rebuilding SciPy!! 🛠 "
-#       echo "📖 Building docs 📖 "
-#       cd doc 
-#       python dev.py --doc
-#       echo "✨ Pre-build complete! You can close this terminal ✨ "
-  
-# # --------------------------------------------------------
-# # exposing ports for liveserve
-# ports:
-#   - port: 5500
-#     onOpen: notify
+tasks:
+  - name: Create conda environment
+    init: |
+      sudo apt update && sudo apt install libgraphviz-dev
+      conda env create --file ./environment.yml
+      echo "conda activate gsdn" >> /home/gitpod/.bashrc
+      conda init
 
 # --------------------------------------------------------
 # some useful extensions to have
