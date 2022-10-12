@@ -1,5 +1,6 @@
 import random
 from typing import Dict, Hashable
+from matplotlib.style import available
 
 import networkx as nx
 
@@ -14,4 +15,8 @@ def schedule(workflow: nx.DiGraph, network: nx.Graph) -> Dict[Hashable, Hashable
     Returns:
         Dict[Hashable, Hashable]: Mapping from task to node
     """
-    return {task: random.choice(list(network.nodes)) for task in workflow.nodes} 
+    available_nodes = [
+        node for node in network.nodes
+        if network.nodes[node]['cpu'] > 1e-3
+    ]
+    return {task: random.choice(available_nodes) for task in workflow.nodes} 

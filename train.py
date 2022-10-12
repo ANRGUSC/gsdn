@@ -18,13 +18,13 @@ MODEL = {
     "layer_params": {
         "n_units": 64,
         "activation": "relu",
-        "dropout": 0.5,
+        "dropout": 0.0,
         "n_hidden_layers": 2
     }
 }
 HYPER_PARAMS = {
-    'lr': 0.0001, 
-    'n_epochs': 500, 
+    'lr': 0.001, 
+    'n_epochs': 200, 
     'weight_decay': 5e-3, 
     'batch_size': 128
 }

@@ -4,6 +4,7 @@ from typing import Dict, Hashable
 
 import dgl
 import networkx as nx
+import numpy as np
 import pandas as pd
 import torch
 
@@ -68,10 +69,10 @@ def schedule(workflow: nx.DiGraph,
         is_cuda=False
     )
     model.load_state_dict(load_weights())
-    # acc, loss = model.eval(graph.ndata['labels'], mask=torch.ones(graph.number_of_nodes(), dtype=torch.bool))
-    # print(f'Accuracy: {acc:.4f}, Loss: {loss:.4f}')
     with torch.no_grad():
         logits = model(None)
+        low_cpu_mask = np.array([network.nodes[node]['cpu'] <= 1e-3 for node in network.nodes])
+        logits[:,low_cpu_mask] = -np.inf # mask out nodes with low cpu - does this make sense?
         _, indices = torch.max(logits, dim=1)
 
     return dict(enumerate(indices.tolist()))

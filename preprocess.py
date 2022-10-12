@@ -45,8 +45,7 @@ def gen_networks(n_networks: int,
         _vertices = [(x/perim, y/perim) for x, y in _vertices]
         polygon = Polygon(_vertices)
 
-        agent_cpus = np.ones(n_nodes)
-        # agent_cpus = np.ones(n_nodes) + np.random.uniform(0, 0.2, n_nodes)
+        agent_cpus = np.ones(n_nodes) # + np.random.normal(0, 0.01, n_nodes)
         # agent_cpus = np.random.triangular(1/2, 1, 3/2, n_nodes)
         # agent_cpus = np.zeros(n_nodes) + 1/100
         # agent_cpus[np.random.randint(0, n_nodes)] = 1
@@ -59,7 +58,8 @@ def gen_networks(n_networks: int,
             agent_cpus=agent_cpus,
             timestep=1/n_sim_rounds, # take networks spread evenly over one unit of time
             radius_threshold=(1+0.01)/n_nodes, # radius of communication
-            bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*n_nodes/perimeter-1)*curvature)) + bandwidth_min
+            bandwidth=lambda x: (1-bandwidth_min)/(1 + np.exp((2*x*n_nodes/perimeter-1)*curvature)) + bandwidth_min,
+            deadzone=0.25
         )
         # visual_sim(sim)
         for network, _ in sim.run(rounds=n_sim_rounds):
@@ -120,9 +120,9 @@ def validate_dataset(networks: Iterator[nx.Graph], workflows: Iterator[nx.DiGrap
 
 
 def main():
-    n_networks = 200
-    n_sim_rounds = 1
-    n_workflows = 20
+    n_networks = 50
+    n_sim_rounds = 10
+    n_workflows = 10
     n_nodes = 10
 
     networks = gen_networks(n_networks, n_sim_rounds, n_nodes)
