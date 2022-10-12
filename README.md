@@ -6,6 +6,8 @@ This repo contains code for training a GCN to imitate the HEFT scheduling algori
 The simulation environment simulates robots patrolling the perimeter of arbitrary polygons with noisy inter-robot communication.
 
 # Basic Usage
+[![Open In Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/ANRGUSC/gsdn/tree/master)
+
 ```bash
 python preprocess.py    # Generate dataset - data saved to ./data/data.pkl
 python train.py         # Train GCNScheduler - weights saved to ./data/model.pt
