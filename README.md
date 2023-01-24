@@ -12,7 +12,7 @@ The simulation environment simulates robots patrolling the perimeter of arbitrar
 python preprocess.py    # Generate dataset - data saved to ./data/data.pkl
 python train.py         # Train GCNScheduler - weights saved to ./data/model.pt
 python simulate.py      # Run simulations - data saved to ./data/results
-python plot.py          # Generate plots - plots saved to ./data/plots
+python plots.py          # Generate plots - plots saved to ./data/plots
 ```
 
 # Acknowledgements
