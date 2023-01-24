@@ -14,3 +14,6 @@ python train.py         # Train GCNScheduler - weights saved to ./data/model.pt
 python simulate.py      # Run simulations - data saved to ./data/results
 python plot.py          # Generate plots - plots saved to ./data/plots
 ```
+
+# Acknowledgements
+This work was supported in part by Army Research Laboratory under Cooperative Agreement W911NF-17-2-0196.
